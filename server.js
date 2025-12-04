@@ -1,112 +1,170 @@
-// server.js
+// server.js (đã bao gồm phần auth google và drive từ trước)
+// Assumes you already wrote SA JSON to TMP_KEY_PATH and created `drive` object
 const express = require('express');
 const {google} = require('googleapis');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const multer = require('multer');
 
 const app = express();
 app.use(express.json());
 
-// === CONFIG from env ===
-// FOLDER_ID: Google Drive folder id
-// SERVICE_ACCOUNT_JSON_BASE64: base64 encoding of service-account.json
-const FOLDER_ID = process.env.FOLDER_ID;
+// --- EXISTING CONFIG (from previous code) ---
+const FOLDER_ID = process.env.FOLDER_ID; // root folder id
 const SA_JSON_B64 = process.env.SERVICE_ACCOUNT_JSON_BASE64;
-
-if (!FOLDER_ID) {
-  console.error('ERROR: FOLDER_ID environment variable is required.');
+if (!FOLDER_ID || !SA_JSON_B64) {
+  console.error('FOLDER_ID and SERVICE_ACCOUNT_JSON_BASE64 required');
   process.exit(1);
 }
-if (!SA_JSON_B64) {
-  console.error('ERROR: SERVICE_ACCOUNT_JSON_BASE64 environment variable is required.');
-  process.exit(1);
-}
-
-// Write service account JSON to a temp file (Render ephemeral filesystem is fine at runtime)
+// write SA file to tmp... (same as before)
 const TMP_KEY_PATH = path.join(os.tmpdir(), `sa-${Date.now()}.json`);
-try {
-  const saJson = Buffer.from(SA_JSON_B64, 'base64').toString('utf8');
-  fs.writeFileSync(TMP_KEY_PATH, saJson, {mode: 0o600});
-} catch (err) {
-  console.error('Failed to write service account JSON:', err);
-  process.exit(1);
-}
+fs.writeFileSync(TMP_KEY_PATH, Buffer.from(SA_JSON_B64, 'base64').toString('utf8'), {mode: 0o600});
 
-const SCOPES = ['https://www.googleapis.com/auth/drive.readonly'];
-const auth = new google.auth.GoogleAuth({
-  keyFile: TMP_KEY_PATH,
-  scopes: SCOPES,
-});
+const SCOPES = ['https://www.googleapis.com/auth/drive'];
+const auth = new google.auth.GoogleAuth({ keyFile: TMP_KEY_PATH, scopes: SCOPES });
 const drive = google.drive({version: 'v3', auth});
 
-// Simple CORS for dev (adjust for production)
-app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*'); // change in production
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
+// --- Category mapping ---
+// Provide mapping by ENV: CATEGORIES_JSON (a JSON string) OR default hardcoded.
+// Format: {"Năm 1":"<folderId-or-empty>","Năm 2":"","Bài Hát Sinh Hoạt":"","Tài Liệu Giáo Án":""}
+let CATEGORY_MAP = {};
+if (process.env.CATEGORIES_JSON) {
+  try { CATEGORY_MAP = JSON.parse(process.env.CATEGORIES_JSON); } catch(e) { CATEGORY_MAP = {}; }
+} else {
+  // default categories (folder ids empty => will create under FOLDER_ID root when first used)
+  CATEGORY_MAP = {
+    "Năm 1": "",
+    "Năm 2": "",
+    "Bài Hát Sinh Hoạt": "",
+    "Tài Liệu Giáo Án": ""
+  };
+}
+
+// helper: get/create folder for category, returns folderId
+async function ensureCategoryFolder(categoryName) {
+  if (!categoryName) categoryName = 'Uncategorized';
+  // if mapped and non-empty -> return
+  if (CATEGORY_MAP[categoryName]) return CATEGORY_MAP[categoryName];
+
+  // try to find folder under root with that name (prevent duplicates)
+  const q = `name = '${categoryName.replace(/'/g, "\\'")}' and '${FOLDER_ID}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+  const resp = await drive.files.list({ q, fields: 'files(id,name)', pageSize: 5 });
+  if (resp.data.files && resp.data.files.length > 0) {
+    const id = resp.data.files[0].id;
+    CATEGORY_MAP[categoryName] = id;
+    return id;
+  }
+
+  // create new folder under root
+  const createRes = await drive.files.create({
+    requestBody: {
+      name: categoryName,
+      mimeType: 'application/vnd.google-apps.folder',
+      parents: [FOLDER_ID],
+    },
+    fields: 'id,name'
+  });
+  const newId = createRes.data.id;
+  CATEGORY_MAP[categoryName] = newId;
+  // Note: the in-memory map is updated, but not persisted. To persist, store in DB or update environment variable.
+  return newId;
+}
+
+// --- Multer setup (store in memory) ---
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 200 * 1024 * 1024 } // 200MB limit adjust as needed
 });
 
-// Health
-app.get('/_health', (req, res) => res.json({ok: true}));
+// --- API: get categories (with folderId if exists) ---
+app.get('/api/categories', (req, res) => {
+  // return array of {name, folderId}
+  const arr = Object.keys(CATEGORY_MAP).map(k => ({ name: k, folderId: CATEGORY_MAP[k] || null }));
+  res.json(arr);
+});
 
-// List files in folder
-app.get('/api/files', async (req, res) => {
+// --- API: upload file to category ---
+app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
-    const q = `'${FOLDER_ID}' in parents and trashed = false`;
+    const file = req.file;
+    const category = req.body.category || 'Uncategorized';
+    const uploaderName = req.body.uploader || 'anonymous';
+
+    if (!file) return res.status(400).json({ error: 'No file uploaded' });
+
+    // ensure folder exists
+    const folderId = await ensureCategoryFolder(category);
+
+    // upload file to Drive under folderId
+    const media = {
+      mimeType: file.mimetype,
+      body: Buffer.from(file.buffer)
+    };
+
+    // googleapis expects a stream or readable; Buffer works via passing buffer in requestBody? use drive.files.create with media.body as stream:
+    // create a temp file or use streamifier. Simpler: create readable stream from buffer:
+    const {Readable} = require('stream');
+    const stream = new Readable();
+    stream._read = () => {};
+    stream.push(file.buffer);
+    stream.push(null);
+
+    const createRes = await drive.files.create({
+      requestBody: {
+        name: file.originalname,
+        parents: [folderId],
+      },
+      media: {
+        mimeType: file.mimetype,
+        body: stream
+      },
+      fields: 'id,name,mimeType,size,webViewLink'
+    });
+
+    // Optionally set file permission to anyone with link (if you want public downloads)
+    // await drive.permissions.create({fileId: createRes.data.id, requestBody: {role: 'reader', type: 'anyone'} });
+
+    res.json({ ok: true, file: createRes.data, category });
+  } catch (err) {
+    console.error('Upload error:', err);
+    res.status(500).json({ error: 'Upload failed', detail: err.message });
+  }
+});
+
+// --- Existing list by category endpoint ---
+// GET /api/list?category=Name
+app.get('/api/list-by-category', async (req, res) => {
+  try {
+    const category = req.query.category;
+    let folderId = FOLDER_ID;
+    if (category) {
+      if (CATEGORY_MAP[category]) folderId = CATEGORY_MAP[category];
+      else {
+        // if not exist, return empty or create? we return empty and client can create via upload
+        return res.json({ folderId: null, folders: [], files: [] });
+      }
+    }
+    // reuse existing /api/list code logic (or inline)
+    const q = `'${folderId}' in parents and trashed = false`;
     const r = await drive.files.list({
       q,
       fields: 'files(id,name,mimeType,size,createdTime,webViewLink)',
-      orderBy: 'createdTime desc',
-      pageSize: 500,
+      orderBy: 'folder,name,createdTime desc',
+      pageSize: 1000,
     });
-    res.json(r.data.files || []);
+    const items = r.data.files || [];
+    const folders = items.filter(it => it.mimeType === 'application/vnd.google-apps.folder');
+    const files = items.filter(it => it.mimeType !== 'application/vnd.google-apps.folder');
+    res.json({ folderId, folders, files });
   } catch (err) {
-    console.error('Error list files:', err);
-    res.status(500).json({error: 'Không thể lấy danh sách file', detail: err.message});
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Download / stream file
-app.get('/api/download/:fileId', async (req, res) => {
-  const fileId = req.params.fileId;
-  if (!fileId) return res.status(400).json({error: 'Missing fileId'});
-
-  try {
-    const meta = await drive.files.get({fileId, fields: 'name,mimeType,size'});
-    const filename = meta.data.name || 'file';
-    const mime = meta.data.mimeType || 'application/octet-stream';
-
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
-    res.setHeader('Content-Type', mime);
-
-    const driveRes = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'stream' });
-    driveRes.data
-      .on('end', () => { /* done */ })
-      .on('error', err => {
-        console.error('Error streaming file:', err);
-        if (!res.headersSent) res.status(500).end();
-      })
-      .pipe(res);
-  } catch (err) {
-    console.error('Error download file:', err);
-    res.status(500).json({error: 'Không thể tải file', detail: err.message});
-  }
-});
-
-// Serve frontend static if exists
-const buildPath = path.join(__dirname, 'frontend', 'build');
-if (fs.existsSync(buildPath)) {
-  app.use(express.static(buildPath));
-  // fallback to index.html
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(buildPath, 'index.html'));
-  });
-}
+// --- keep previous /api/list and /api/download endpoints as before ---
+// ... (ensure these are present, as earlier provided)
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`Server started on port ${PORT}`);
-});
+app.listen(PORT, () => console.log('Server running on', PORT));
