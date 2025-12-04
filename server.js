@@ -1,20 +1,23 @@
 // server.js
-const express = require("express");
-const { google } = require("googleapis");
-const fs = require("fs");
-const path = require("path");
-const os = require("os");
-const multer = require("multer");
-const { Readable } = require("stream");
+// BEGIN - replace the top of server.js with this block
+const express = require('express');
 const cors = require('cors');
-// allow only your dev origin (better) or use { origin: '*' } to allow all
-app.use(cors({
-  origin: 'http://127.0.0.1:5500' // hoặc '*' nếu bạn muốn tạm cho mọi origin
-}));
+const { google } = require('googleapis');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const multer = require('multer');
 
-
+// create express app FIRST
 const app = express();
+
+// CORS: cho phép origin dev local. 
+// - Khi deploy frontend vào domain thực, đổi 'http://127.0.0.1:5500' -> 'https://your-frontend-domain'
+// - Muốn tạm cho mọi origin: use { origin: '*' }
+app.use(cors({ origin: 'http://127.0.0.1:5500' }));
 app.use(express.json());
+// END - top of server.js
+
 
 // ─────────────────────────────────────────────
 // 1) Load ENV
@@ -256,4 +259,5 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log("✅ Server is running on port", PORT);
 });
+
 
