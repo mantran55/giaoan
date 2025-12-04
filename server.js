@@ -6,6 +6,12 @@ const path = require("path");
 const os = require("os");
 const multer = require("multer");
 const { Readable } = require("stream");
+const cors = require('cors');
+// allow only your dev origin (better) or use { origin: '*' } to allow all
+app.use(cors({
+  origin: 'http://127.0.0.1:5500' // hoặc '*' nếu bạn muốn tạm cho mọi origin
+}));
+
 
 const app = express();
 app.use(express.json());
@@ -250,3 +256,4 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log("✅ Server is running on port", PORT);
 });
+
