@@ -1,0 +1,16 @@
+{
+  "name": "drive-doc-server",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "heroku-postbuild": "cd frontend && if [ -f package.json ]; then npm install && npm run build; fi"
+  },
+  "engines": {
+    "node": "18.x"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "googleapis": "^121.0.0"
+  }
+}
