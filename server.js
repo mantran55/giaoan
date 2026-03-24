@@ -69,50 +69,6 @@ app.get('/api/files', async (req, res) => {
   }
 });
 
-// API để lấy link xem trước (Preview)
-app.get('/api/preview/:fileId', async (req, res) => {
-  try {
-    if (!drive) return res.status(500).json({ error: 'Drive client not initialized' });
-    const fileId = req.params.fileId;
-    
-    // Lấy thông tin file để kiểm tra định dạng (mimeType)
-    const meta = await drive.files.get({ fileId, fields: 'mimeType, name', supportsAllDrives: true });
-    const mimeType = meta.data.mimeType;
-    const fileName = meta.data.name;
-
-    // 1. Nếu là Google Slides hoặc Google Docs -> Xuất ra PDF trực tiếp
-    if (mimeType === 'application/vnd.google-apps.presentation' || mimeType === 'application/vnd.google-apps.document') {
-      // Redirect đến link xuất PDF của Google
-      const exportUrl = `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=application/pdf&key=${process.env.GOOGLE_API_KEY}`;
-      // Lưu ý: Cách đơn giản nhất là dùng stream để tránh lộ key, nhưng ở đây ta dùng redirect có auth
-      // Ta sẽ pipe dữ liệu pdf để đảm bảo bảo mật
-      const pdfRes = await drive.files.export({ fileId, mimeType: 'application/pdf' }, { responseType: 'stream' });
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(fileName)}.pdf"`);
-      pdfRes.data.pipe(res);
-    } 
-    // 2. Nếu là file PDF gốc -> Đọc và hiển thị
-    else if (mimeType === 'application/pdf') {
-      const driveRes = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'stream', supportsAllDrives: true });
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(fileName)}"`);
-      driveRes.data.pipe(res);
-    }
-    // 3. Với các file khác (PPTX, DOCX, Ảnh) -> Trả về link view của Google
-    // Vì server không thể chuyển PPTX ra PDF nhanh, ta dùng Google Viewer
-    else {
-      // Trả về một URL để client mở trong iframe mới
-      res.json({ 
-        previewUrl: `https://drive.google.com/file/d/${fileId}/preview`,
-        type: 'external' 
-      });
-    }
-  } catch (err) {
-    console.error('Preview error:', err);
-    res.status(500).json({ error: 'Cannot preview this file' });
-  }
-});
-
 // Download / stream file
 app.get('/api/download/:fileId', async (req, res) => {
   try {
