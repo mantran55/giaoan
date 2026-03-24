@@ -1,47 +1,43 @@
-// server.js
 const express = require('express');
-const {google} = require('googleapis');
+const { google } = require('googleapis');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
 const app = express();
 app.use(express.json());
+
 // === CONFIG from env ===
-// FOLDER_ID: Google Drive folder id
-// SERVICE_ACCOUNT_JSON_BASE64: base64 encoding of service-account.json
 const FOLDER_ID = process.env.FOLDER_ID;
 const SA_JSON_B64 = process.env.SERVICE_ACCOUNT_JSON_BASE64;
 
-if (!FOLDER_ID) {
-  console.error('ERROR: FOLDER_ID environment variable is required.');
-  process.exit(1);
-}
-if (!SA_JSON_B64) {
-  console.error('ERROR: SERVICE_ACCOUNT_JSON_BASE64 environment variable is required.');
-  process.exit(1);
-}
+if (!FOLDER_ID) console.warn('WARNING: FOLDER_ID not set.');
+if (!SA_JSON_B64) console.warn('WARNING: SERVICE_ACCOUNT_JSON_BASE64 not set.');
 
-// Write service account JSON to a temp file (Render ephemeral filesystem is fine at runtime)
-const TMP_KEY_PATH = path.join(os.tmpdir(), `sa-${Date.now()}.json`);
+let TMP_KEY_PATH = '';
 try {
-  const saJson = Buffer.from(SA_JSON_B64, 'base64').toString('utf8');
-  fs.writeFileSync(TMP_KEY_PATH, saJson, {mode: 0o600});
+  if (SA_JSON_B64) {
+    TMP_KEY_PATH = path.join(os.tmpdir(), `sa-${Date.now()}.json`);
+    fs.writeFileSync(TMP_KEY_PATH, Buffer.from(SA_JSON_B64, 'base64').toString('utf8'), { mode: 0o600 });
+  }
 } catch (err) {
-  console.error('Failed to write service account JSON:', err);
-  process.exit(1);
+  console.error('Failed to write SA JSON:', err);
 }
 
-const SCOPES = ['https://www.googleapis.com/auth/drive.readonly'];
-const auth = new google.auth.GoogleAuth({
-  keyFile: TMP_KEY_PATH,
-  scopes: SCOPES,
-});
-const drive = google.drive({version: 'v3', auth});
+let drive = null;
+try {
+  if (TMP_KEY_PATH) {
+    const SCOPES = ['https://www.googleapis.com/auth/drive.readonly'];
+    const auth = new google.auth.GoogleAuth({ keyFile: TMP_KEY_PATH, scopes: SCOPES });
+    drive = google.drive({ version: 'v3', auth });
+  }
+} catch (err) {
+  console.error('Drive init error:', err);
+}
 
-// Simple CORS for dev (adjust for production)
+// CORS
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*'); // change in production
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
@@ -49,26 +45,41 @@ app.use((req, res, next) => {
 });
 
 // Health
-app.get('/_health', (req, res) => res.json({ok: true}));
+app.get('/_health', (req, res) => res.json({ ok: true }));
 
-// List files in folder
-app.get('/api/files', async (req, res) => {
+// --- API CHÍNH: LẤY DANH SÁCH FILE/THƯ MỤC ---
+// Frontend script.js đang gọi endpoint này
+app.get('/api/list', async (req, res) => {
   try {
-    const q = `'${FOLDER_ID}' in parents and trashed = false`;
+    if (!drive) return res.status(500).json({ error: 'Drive client not initialized' });
+    
+    // Lấy folderId từ query, nếu không có thì dùng FOLDER_ID gốc (root)
+    const folderId = req.query.folderId || FOLDER_ID;
+    if (!folderId) return res.status(400).json({ error: 'folderId is required' });
+
+    const q = `'${folderId}' in parents and trashed = false`;
     const r = await drive.files.list({
       q,
       fields: 'files(id,name,mimeType,size,createdTime,webViewLink)',
-      orderBy: 'createdTime desc',
-      pageSize: 500,
+      orderBy: 'folder,name,createdTime desc',
+      pageSize: 1000,
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true
     });
-    res.json(r.data.files || []);
+
+    const items = r.data.files || [];
+    // Tách biệt folder và file để frontend dễ xử lý
+    const folders = items.filter(it => it.mimeType === 'application/vnd.google-apps.folder');
+    const files = items.filter(it => it.mimeType !== 'application/vnd.google-apps.folder');
+
+    res.json({ folderId, folders, files });
   } catch (err) {
-    console.error('Error list files:', err);
-    res.status(500).json({error: 'Không thể lấy danh sách file', detail: err.message});
+    console.error('/api/list error:', err);
+    res.status(500).json({ error: 'Không thể lấy danh sách', detail: err.message });
   }
 });
 
-// Download / stream file
+// --- API TẢI FILE ---
 app.get('/api/download/:fileId', async (req, res) => {
   try {
     if (!drive) return res.status(500).json({ error: 'Drive client not initialized' });
@@ -79,15 +90,9 @@ app.get('/api/download/:fileId', async (req, res) => {
     const filename = meta.data.name || 'file';
     const mime = meta.data.mimeType || 'application/octet-stream';
 
-    // --- BẮT ĐẦU PHẦN SỬA LỖI TÊN FILE CHO MAC/IPHONE ---
-    // Chuẩn hóa tên file: Loại bỏ ký tự đặc biệt gây lỗi trên iOS
-    let safeFilename = filename;
-    // Thay thế dấu ngoặc kép, dấu hai chấu... nếu cần, hoặc giữ nguyên nếu muốn
-    // Quan trọng nhất là thiết lập header chuẩn RFC 5987
+    // SỬA LỖI TÊN FILE CHO MAC/IPHONE (RFC 5987)
     res.setHeader('Content-Type', mime);
-    // Dùng filename*=UTF-8'' để Safari hiểu tiếng Việt và khoảng trắng
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
-    // --- KẾT THÚC PHẦN SỬA ---
 
     const driveRes = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'stream', supportsAllDrives: true });
     driveRes.data.on('error', err => {
@@ -95,22 +100,17 @@ app.get('/api/download/:fileId', async (req, res) => {
       if (!res.headersSent) res.status(500).end();
     }).pipe(res);
   } catch (err) {
-    console.error('/api/download error:', err && err.stack ? err.stack : err);
+    console.error('/api/download error:', err);
     res.status(500).json({ error: err.message || 'download failed' });
   }
 });
 
-// Serve frontend static if exists
+// Serve static frontend
 const buildPath = path.join(__dirname, 'frontend', 'build');
 if (fs.existsSync(buildPath)) {
   app.use(express.static(buildPath));
-  // fallback to index.html
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(buildPath, 'index.html'));
-  });
+  app.get('*', (req, res) => res.sendFile(path.join(buildPath, 'index.html')));
 }
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`Server started on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
