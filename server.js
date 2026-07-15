@@ -106,7 +106,7 @@ app.get('/api/download/:fileId', async (req, res) => {
 });
 
 // --- API XEM TRƯỚC POWERPOINT ---
-// Google Docs Viewer sẽ tải nội dung từ URL này để hiển thị trong iframe.
+// Microsoft Office Viewer sẽ tải nội dung từ URL này để hiển thị trong iframe.
 app.get('/api/preview/:fileId', async (req, res) => {
   try {
     if (!drive) return res.status(500).json({ error: 'Drive client not initialized' });
@@ -117,14 +117,16 @@ app.get('/api/preview/:fileId', async (req, res) => {
     const sourceMime = meta.data.mimeType || 'application/octet-stream';
     const isGooglePresentation = sourceMime === 'application/vnd.google-apps.presentation';
     const filename = meta.data.name || 'presentation';
-    const previewMime = isGooglePresentation ? 'application/pdf' : sourceMime;
-    const previewName = isGooglePresentation ? filename.replace(/\.[^.]+$/, '') + '.pdf' : filename;
+    const previewMime = isGooglePresentation
+      ? 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+      : sourceMime;
+    const previewName = isGooglePresentation ? filename.replace(/\.[^.]+$/, '') + '.pptx' : filename;
 
     res.setHeader('Content-Type', previewMime);
     res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(previewName)}`);
 
     const driveRes = isGooglePresentation
-      ? await drive.files.export({ fileId, mimeType: 'application/pdf', supportsAllDrives: true }, { responseType: 'stream' })
+      ? await drive.files.export({ fileId, mimeType: previewMime, supportsAllDrives: true }, { responseType: 'stream' })
       : await drive.files.get({ fileId, alt: 'media' }, { responseType: 'stream', supportsAllDrives: true });
 
     driveRes.data.on('error', err => {
