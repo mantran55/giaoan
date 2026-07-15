@@ -105,6 +105,38 @@ app.get('/api/download/:fileId', async (req, res) => {
   }
 });
 
+// --- API XEM TRƯỚC POWERPOINT ---
+// Google Docs Viewer sẽ tải nội dung từ URL này để hiển thị trong iframe.
+app.get('/api/preview/:fileId', async (req, res) => {
+  try {
+    if (!drive) return res.status(500).json({ error: 'Drive client not initialized' });
+    const fileId = req.params.fileId;
+    if (!fileId) return res.status(400).json({ error: 'fileId required' });
+
+    const meta = await drive.files.get({ fileId, fields: 'name,mimeType', supportsAllDrives: true });
+    const sourceMime = meta.data.mimeType || 'application/octet-stream';
+    const isGooglePresentation = sourceMime === 'application/vnd.google-apps.presentation';
+    const filename = meta.data.name || 'presentation';
+    const previewMime = isGooglePresentation ? 'application/pdf' : sourceMime;
+    const previewName = isGooglePresentation ? filename.replace(/\.[^.]+$/, '') + '.pdf' : filename;
+
+    res.setHeader('Content-Type', previewMime);
+    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(previewName)}`);
+
+    const driveRes = isGooglePresentation
+      ? await drive.files.export({ fileId, mimeType: 'application/pdf', supportsAllDrives: true }, { responseType: 'stream' })
+      : await drive.files.get({ fileId, alt: 'media' }, { responseType: 'stream', supportsAllDrives: true });
+
+    driveRes.data.on('error', err => {
+      console.error('Preview stream error:', err);
+      if (!res.headersSent) res.status(500).end();
+    }).pipe(res);
+  } catch (err) {
+    console.error('/api/preview error:', err);
+    res.status(500).json({ error: err.message || 'preview failed' });
+  }
+});
+
 // Serve static frontend
 const buildPath = path.join(__dirname, 'frontend', 'build');
 if (fs.existsSync(buildPath)) {
