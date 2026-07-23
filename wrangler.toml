@@ -1,6 +1,0 @@
-name = "giaoan-drive-api"
-main = "src/index.mjs"
-compatibility_date = "2026-07-23"
-
-# Set FOLDER_ID and GOOGLE_SERVICE_ACCOUNT_JSON with `wrangler secret put`.
-# Do not store either value in this file or commit service-account credentials.
