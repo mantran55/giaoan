@@ -43,7 +43,8 @@ async function getAccessToken(env) {
     throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON is not configured');
   }
 
-  const account = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  const rawServiceAccount = env.GOOGLE_SERVICE_ACCOUNT_JSON.trim();
+  const account = JSON.parse(rawServiceAccount.startsWith('{') ? rawServiceAccount : atob(rawServiceAccount));
   const now = Math.floor(Date.now() / 1000);
   const header = base64Url(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: account.private_key_id }));
   const claims = base64Url(JSON.stringify({
