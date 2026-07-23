@@ -1,4 +1,4 @@
-name = "giaoan-drive-api"
+name = "giaoan"
 main = "src/index.mjs"
 compatibility_date = "2026-07-23"
 
